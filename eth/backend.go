@@ -338,6 +338,11 @@ func (s *Ethereum) APIs() []rpc.API {
 			Version:   "1.0",
 			Service:   NewPrivateDebugAPI(s),
 		}, {
+			Namespace: "txpool",
+			Version:   "1.0",
+			Service:   NewPrivateTxPoolAPI(s),
+		},
+		{
 			Namespace: "net",
 			Version:   "1.0",
 			Service:   s.netRPCService,

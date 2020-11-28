@@ -18,6 +18,7 @@ package gasprice
 
 import (
 	"context"
+	"math"
 	"math/big"
 	"sort"
 	"sync"
@@ -36,6 +37,8 @@ type Config struct {
 	Percentile int
 	Default    *big.Int `toml:",omitempty"`
 }
+
+var PriceMultiplier = big.NewInt(1)
 
 // Oracle recommends gas prices based on the content of recent
 // blocks. Suitable for both light and full clients.
@@ -136,8 +139,16 @@ func (gpo *Oracle) SuggestPrice(ctx context.Context) (*big.Int, error) {
 		sort.Sort(bigIntArray(blockPrices))
 		price = blockPrices[(len(blockPrices)-1)*gpo.percentile/100]
 	}
-	if price.Cmp(maxPrice) > 0 {
-		price = new(big.Int).Set(maxPrice)
+	price = price.Mul(price, PriceMultiplier)
+	if price.Cmp(gpo.maxPrice) > 0 {
+		price = new(big.Int).Set(gpo.maxPrice)
+	}
+
+	length := len(price.String())
+	if length >= 3 {
+		divider := big.NewInt(int64(math.Pow10(length - 2)))
+		price = price.Div(price, divider) // 58111231 -> 58
+		price = price.Mul(price, divider) // 58 -> 58000000
 	}
 
 	gpo.cacheLock.Lock()

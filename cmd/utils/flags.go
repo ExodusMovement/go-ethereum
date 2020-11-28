@@ -241,6 +241,10 @@ var (
 		Name:  "whitelist",
 		Usage: "Comma separated block number-to-hash mappings to enforce (<number>=<hash>)",
 	}
+	BlockTraceCache = cli.BoolFlag{
+		Name:  "trace.cache",
+		Usage: "Enables building block trace cache on chain import",
+	}
 	OverrideIstanbulFlag = cli.Uint64Flag{
 		Name:  "override.istanbul",
 		Usage: "Manually specify Istanbul fork-block, overriding the bundled setting",
@@ -701,6 +705,11 @@ var (
 		Name:  "gpopercentile",
 		Usage: "Suggested gas price is the given percentile of a set of recent transaction gas prices",
 		Value: eth.DefaultConfig.GPO.Percentile,
+	}
+	GpoMultiplier = cli.IntFlag{
+		Name:  "gpomultiplier",
+		Usage: "Multiply suggested price by a specified int number",
+		Value: 1,
 	}
 	WhisperEnabledFlag = cli.BoolFlag{
 		Name:  "shh",
@@ -1275,6 +1284,13 @@ func setGPO(ctx *cli.Context, cfg *gasprice.Config) {
 	}
 }
 
+func setGPOMultiplier(ctx *cli.Context) {
+	if ctx.GlobalIsSet(GpoMultiplier.Name) {
+		num := int64(ctx.GlobalInt(GpoMultiplier.Name))
+		gasprice.PriceMultiplier = big.NewInt(num)
+	}
+}
+
 func setTxPool(ctx *cli.Context, cfg *core.TxPoolConfig) {
 	if ctx.GlobalIsSet(TxPoolLocalsFlag.Name) {
 		locals := strings.Split(ctx.GlobalString(TxPoolLocalsFlag.Name), ",")
@@ -1462,12 +1478,16 @@ func SetEthConfig(ctx *cli.Context, stack *node.Node, cfg *eth.Config) {
 	CheckExclusive(ctx, LightLegacyServFlag, LightServeFlag, SyncModeFlag, "light")
 	CheckExclusive(ctx, DeveloperFlag, ExternalSignerFlag) // Can't use both ephemeral unlocked and external signer
 
+	if ctx.GlobalIsSet(BlockTraceCache.Name) {
+		core.ShouldCacheTraces = true
+	}
 	var ks *keystore.KeyStore
 	if keystores := stack.AccountManager().Backends(keystore.KeyStoreType); len(keystores) > 0 {
 		ks = keystores[0].(*keystore.KeyStore)
 	}
 	setEtherbase(ctx, ks, cfg)
 	setGPO(ctx, &cfg.GPO)
+	setGPOMultiplier(ctx)
 	setTxPool(ctx, &cfg.TxPool)
 	setEthash(ctx, cfg)
 	setMiner(ctx, &cfg.Miner)

@@ -24,7 +24,11 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/eth/tracers"
+	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/ethereum/go-ethereum/rpc"
+	"time"
 )
 
 // StateProcessor is a basic Processor, which takes care of transitioning
@@ -54,6 +58,55 @@ func NewStateProcessor(config *params.ChainConfig, bc *BlockChain, engine consen
 // returns the amount of gas that was used in the process. If any of the
 // transactions failed to execute due to insufficient gas it will return an error.
 func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg vm.Config) (types.Receipts, []*types.Log, uint64, error) {
+	if ShouldCacheTraces {
+		return p.processWithTrace(block, statedb, cfg)
+	}
+
+	return p.process(block, statedb, cfg)
+}
+
+func (p *StateProcessor) processWithTrace(block *types.Block, statedb *state.StateDB, cfg vm.Config) (types.Receipts, []*types.Log, uint64, error) {
+	var (
+		receipts types.Receipts
+		usedGas  = new(uint64)
+		header   = block.Header()
+		allLogs  []*types.Log
+		gp       = new(GasPool).AddGas(block.GasLimit())
+		results  = make([]*rpc.TxTraceResult, 0)
+	)
+	// Mutate the block and state according to any hard-fork specs
+	if p.config.DAOForkSupport && p.config.DAOForkBlock != nil && p.config.DAOForkBlock.Cmp(block.Number()) == 0 {
+		misc.ApplyDAOHardFork(statedb)
+	}
+	// Iterate over and process the individual transactions
+	startProcessing := time.Now()
+	for i, tx := range block.Transactions() {
+		tracer, _ := tracers.New("callTracer")
+		statedb.Prepare(tx.Hash(), block.Hash(), i)
+		receipt, err := ApplyTransaction(p.config, p.bc, nil, gp, statedb, header, tx, usedGas, vm.Config{Debug: true, Tracer: tracer})
+		if err != nil {
+			return nil, nil, 0, err
+		}
+		receipts = append(receipts, receipt)
+		allLogs = append(allLogs, receipt.Logs...)
+		res, _ := tracer.GetResult()
+		results = append(results, &rpc.TxTraceResult{Result: res})
+	}
+
+	log.Info("Processing TXs for block with tracing", "number", block.Number(),
+		"elapsed", common.PrettyDuration(time.Since(startProcessing)),
+		"trace length", len(results))
+	// Finalize the block, applying any consensus engine specific extras (e.g. block rewards)
+	p.engine.Finalize(p.bc, header, statedb, block.Transactions(), block.Uncles())
+
+	if len(results) > 0 {
+		rpc.SetToCache(block.Hash().String(), results)
+	}
+
+	return receipts, allLogs, *usedGas, nil
+}
+
+func (p *StateProcessor) process(block *types.Block, statedb *state.StateDB, cfg vm.Config) (types.Receipts, []*types.Log, uint64, error) {
 	var (
 		receipts types.Receipts
 		usedGas  = new(uint64)
@@ -66,6 +119,7 @@ func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg
 		misc.ApplyDAOHardFork(statedb)
 	}
 	// Iterate over and process the individual transactions
+	startProcessing := time.Now()
 	for i, tx := range block.Transactions() {
 		statedb.Prepare(tx.Hash(), block.Hash(), i)
 		receipt, err := ApplyTransaction(p.config, p.bc, nil, gp, statedb, header, tx, usedGas, cfg)
@@ -75,6 +129,10 @@ func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg
 		receipts = append(receipts, receipt)
 		allLogs = append(allLogs, receipt.Logs...)
 	}
+
+	log.Info("Processing TXs for block", "number", block.Number(),
+		"elapsed", common.PrettyDuration(time.Since(startProcessing)),
+	)
 	// Finalize the block, applying any consensus engine specific extras (e.g. block rewards)
 	p.engine.Finalize(p.bc, header, statedb, block.Transactions(), block.Uncles())
 

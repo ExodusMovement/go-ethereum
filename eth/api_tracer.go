@@ -20,9 +20,11 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/ioutil"
+	"math/big"
 	"os"
 	"runtime"
 	"sync"
@@ -46,7 +48,7 @@ import (
 const (
 	// defaultTraceTimeout is the amount of time a single transaction can execute
 	// by default before being forcefully aborted.
-	defaultTraceTimeout = 5 * time.Second
+	defaultTraceTimeout = 1 * time.Minute
 
 	// defaultTraceReexec is the number of blocks the tracer is willing to go back
 	// and reexecute to produce missing historical state necessary to run a specific
@@ -97,6 +99,10 @@ type blockTraceResult struct {
 type txTraceTask struct {
 	statedb *state.StateDB // Intermediate state prepped for tracing
 	index   int            // Transaction offset in the block
+}
+
+func getFromCache(hash string) []*rpc.TxTraceResult {
+	return rpc.GetFromCache(hash)
 }
 
 // TraceChain returns the structured logs created during the execution of EVM
@@ -352,7 +358,7 @@ func (api *PrivateDebugAPI) traceChain(ctx context.Context, start, end *types.Bl
 
 // TraceBlockByNumber returns the structured logs created during the execution of
 // EVM and returns them as a JSON object.
-func (api *PrivateDebugAPI) TraceBlockByNumber(ctx context.Context, number rpc.BlockNumber, config *TraceConfig) ([]*txTraceResult, error) {
+func (api *PrivateDebugAPI) TraceBlockByNumber(ctx context.Context, number rpc.BlockNumber, config *TraceConfig) ([]*rpc.TxTraceResult, error) {
 	// Fetch the block that we want to trace
 	var block *types.Block
 
@@ -368,12 +374,23 @@ func (api *PrivateDebugAPI) TraceBlockByNumber(ctx context.Context, number rpc.B
 	if block == nil {
 		return nil, fmt.Errorf("block #%d not found", number)
 	}
+
+	cacheEntry := getFromCache(block.Hash().String())
+	if cacheEntry != nil {
+		return cacheEntry, nil
+	}
+
 	return api.traceBlock(ctx, block, config)
 }
 
 // TraceBlockByHash returns the structured logs created during the execution of
 // EVM and returns them as a JSON object.
-func (api *PrivateDebugAPI) TraceBlockByHash(ctx context.Context, hash common.Hash, config *TraceConfig) ([]*txTraceResult, error) {
+func (api *PrivateDebugAPI) TraceBlockByHash(ctx context.Context, hash common.Hash, config *TraceConfig) ([]*rpc.TxTraceResult, error) {
+	cacheEntry := getFromCache(hash.String())
+	if cacheEntry != nil {
+		return cacheEntry, nil
+	}
+
 	block := api.eth.blockchain.GetBlockByHash(hash)
 	if block == nil {
 		return nil, fmt.Errorf("block %#x not found", hash)
@@ -383,17 +400,23 @@ func (api *PrivateDebugAPI) TraceBlockByHash(ctx context.Context, hash common.Ha
 
 // TraceBlock returns the structured logs created during the execution of EVM
 // and returns them as a JSON object.
-func (api *PrivateDebugAPI) TraceBlock(ctx context.Context, blob []byte, config *TraceConfig) ([]*txTraceResult, error) {
+func (api *PrivateDebugAPI) TraceBlock(ctx context.Context, blob []byte, config *TraceConfig) ([]*rpc.TxTraceResult, error) {
 	block := new(types.Block)
 	if err := rlp.Decode(bytes.NewReader(blob), block); err != nil {
 		return nil, fmt.Errorf("could not decode block: %v", err)
 	}
+
+	cacheEntry := getFromCache(block.Hash().String())
+	if cacheEntry != nil {
+		return cacheEntry, nil
+	}
+
 	return api.traceBlock(ctx, block, config)
 }
 
 // TraceBlockFromFile returns the structured logs created during the execution of
 // EVM and returns them as a JSON object.
-func (api *PrivateDebugAPI) TraceBlockFromFile(ctx context.Context, file string, config *TraceConfig) ([]*txTraceResult, error) {
+func (api *PrivateDebugAPI) TraceBlockFromFile(ctx context.Context, file string, config *TraceConfig) ([]*rpc.TxTraceResult, error) {
 	blob, err := ioutil.ReadFile(file)
 	if err != nil {
 		return nil, fmt.Errorf("could not read file: %v", err)
@@ -404,7 +427,7 @@ func (api *PrivateDebugAPI) TraceBlockFromFile(ctx context.Context, file string,
 // TraceBadBlockByHash returns the structured logs created during the execution of
 // EVM against a block pulled from the pool of bad ones and returns them as a JSON
 // object.
-func (api *PrivateDebugAPI) TraceBadBlock(ctx context.Context, hash common.Hash, config *TraceConfig) ([]*txTraceResult, error) {
+func (api *PrivateDebugAPI) TraceBadBlock(ctx context.Context, hash common.Hash, config *TraceConfig) ([]*rpc.TxTraceResult, error) {
 	blocks := api.eth.blockchain.BadBlocks()
 	for _, block := range blocks {
 		if block.Hash() == hash {
@@ -441,7 +464,7 @@ func (api *PrivateDebugAPI) StandardTraceBadBlockToFile(ctx context.Context, has
 // traceBlock configures a new tracer according to the provided configuration, and
 // executes all the transactions contained within. The return value will be one item
 // per transaction, dependent on the requestd tracer.
-func (api *PrivateDebugAPI) traceBlock(ctx context.Context, block *types.Block, config *TraceConfig) ([]*txTraceResult, error) {
+func (api *PrivateDebugAPI) traceBlock(ctx context.Context, block *types.Block, config *TraceConfig) ([]*rpc.TxTraceResult, error) {
 	// Create the parent state database
 	if err := api.eth.engine.VerifyHeader(api.eth.blockchain, block.Header(), true); err != nil {
 		return nil, err
@@ -454,6 +477,7 @@ func (api *PrivateDebugAPI) traceBlock(ctx context.Context, block *types.Block, 
 	if config != nil && config.Reexec != nil {
 		reexec = *config.Reexec
 	}
+
 	statedb, err := api.computeStateDB(parent, reexec)
 	if err != nil {
 		return nil, err
@@ -463,7 +487,7 @@ func (api *PrivateDebugAPI) traceBlock(ctx context.Context, block *types.Block, 
 		signer = types.MakeSigner(api.eth.blockchain.Config(), block.Number())
 
 		txs     = block.Transactions()
-		results = make([]*txTraceResult, len(txs))
+		results = make([]*rpc.TxTraceResult, len(txs))
 
 		pend = new(sync.WaitGroup)
 		jobs = make(chan *txTraceTask, len(txs))
@@ -484,10 +508,10 @@ func (api *PrivateDebugAPI) traceBlock(ctx context.Context, block *types.Block, 
 
 				res, err := api.traceTx(ctx, msg, vmctx, task.statedb, config)
 				if err != nil {
-					results[task.index] = &txTraceResult{Error: err.Error()}
+					results[task.index] = &rpc.TxTraceResult{Error: err.Error()}
 					continue
 				}
-				results[task.index] = &txTraceResult{Result: res}
+				results[task.index] = &rpc.TxTraceResult{Result: res}
 			}
 		}()
 	}
@@ -517,6 +541,9 @@ func (api *PrivateDebugAPI) traceBlock(ctx context.Context, block *types.Block, 
 	if failed != nil {
 		return nil, failed
 	}
+
+	rpc.SetToCache(block.Hash().String(), results)
+
 	return results, nil
 }
 
@@ -821,3 +848,315 @@ func (api *PrivateDebugAPI) computeTxEnv(blockHash common.Hash, txIndex int, ree
 	}
 	return nil, vm.Context{}, nil, fmt.Errorf("transaction index %d out of range for block %#x", txIndex, blockHash)
 }
+
+func (api *PrivateDebugAPI) decodeRawTransactionToMessage(rawTransaction string) (*types.Message, error) {
+	var tx *types.Transaction
+	rawtx, err := hex.DecodeString(rawTransaction)
+	if err != nil {
+		panic(err)
+	}
+	rlp.DecodeBytes(rawtx, &tx)
+	eip155Signer := types.NewEIP155Signer(big.NewInt(int64(1)))
+	message, err := tx.AsMessage(eip155Signer)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return &message, nil
+}
+
+func (api *PrivateDebugAPI) fetchTxPoolContent() (map[common.Address]types.Transactions, map[common.Address]types.Transactions) {
+	pending, queue := api.eth.APIBackend.TxPoolContent()
+
+	return pending, queue
+}
+
+type SimulationConfig struct {
+	ApplyPending   bool
+	RawTransaction string
+	ApplyBefore    []string
+}
+
+type SimulatePendingConfig struct {
+	Hash         common.Hash
+	ApplyPending bool
+}
+
+func (api *PrivateDebugAPI) fetchPreviousTxsForAddress(address common.Address) types.Transactions {
+	pending, queued := api.eth.APIBackend.TxPoolContent()
+	var result = make([]*types.Transaction, len(pending[address])+len(queued[address]))
+
+	for i, queuedTx := range queued[address] {
+		result[i] = queuedTx
+	}
+	for i, pendingTx := range pending[address] {
+		result[i+len(queued[address])] = pendingTx
+	}
+
+	return result
+}
+
+//func (api *PrivateDebugAPI) SimulateRawTransaction(ctx context.Context, simulationConf *SimulationConfig, traceConf *TraceConfig) (interface{}, error) {
+//	simulateStart := time.Now()
+//
+//	if simulationConf == nil {
+//		return nil, errors.New("simulation config should be passed")
+//	}
+//	if simulationConf.ApplyPending && len(simulationConf.ApplyBefore) > 0 {
+//		return nil, errors.New("applyBefore and applyPending are mutually exclusive")
+//	}
+//
+//	var (
+//		tracer                      vm.Tracer
+//		err                         error
+//		dependableFailedTransaction string
+//		dependableFailedTxError     error
+//	)
+//
+//	message, err := api.decodeRawTransactionToMessage(simulationConf.RawTransaction)
+//	if err != nil {
+//		return nil, err
+//	}
+//
+//	block := api.eth.blockchain.CurrentBlock()
+//	statedb, err := api.computeStateDB(block, 128)
+//	if err != nil {
+//		return nil, err
+//	}
+//
+//	vmctx := core.NewEVMContext(message, block.Header(), api.eth.blockchain, nil)
+//
+//	switch {
+//	case traceConf != nil && traceConf.Tracer != nil:
+//		// Define a meaningful timeout of a single transaction trace
+//		timeout := defaultTraceTimeout
+//		if traceConf.Timeout != nil {
+//			if timeout, err = time.ParseDuration(*traceConf.Timeout); err != nil {
+//				return nil, err
+//			}
+//		}
+//		// Constuct the JavaScript tracer to execute with
+//		if tracer, err = tracers.New(*traceConf.Tracer); err != nil {
+//			return nil, err
+//		}
+//		// Handle timeouts and RPC cancellations
+//		deadlineCtx, cancel := context.WithTimeout(ctx, timeout)
+//		go func() {
+//			<-deadlineCtx.Done()
+//			tracer.(*tracers.Tracer).Stop(errors.New("execution timeout"))
+//		}()
+//		defer cancel()
+//
+//	case traceConf == nil:
+//		tracer = vm.NewStructLogger(nil)
+//
+//	default:
+//		tracer = vm.NewStructLogger(traceConf.LogConfig)
+//	}
+//
+//	vmenv := vm.NewEVM(vmctx, statedb, params.MainnetChainConfig, vm.Config{Debug: true, Tracer: tracer})
+//
+//	// apply pending transactions from the same account
+//	if simulationConf.ApplyPending {
+//		pending := api.fetchPreviousTxsForAddress(message.From())
+//		eip155Signer := types.NewEIP155Signer(big.NewInt(int64(1)))
+//
+//		for _, tx := range pending {
+//			if tx.Nonce() < message.Nonce() {
+//				msg, _ := tx.AsMessage(eip155Signer)
+//				vmenv := vm.NewEVM(vmctx, statedb, api.eth.blockchain.Config(), vm.Config{})
+//				if _, err := core.ApplyMessage(vmenv, msg, new(core.GasPool).AddGas(msg.Gas())); err != nil {
+//					dependableFailedTxError = err
+//					dependableFailedTransaction = tx.Hash().String()
+//					break
+//				}
+//				// Finalize the state so any modifications are written to the trie
+//				// Only delete empty objects if EIP158/161 (a.k.a Spurious Dragon) is in effect
+//				statedb.Finalise(vmenv.ChainConfig().IsEIP158(block.Number()))
+//			}
+//		}
+//	} else if len(simulationConf.ApplyBefore) > 0 {
+//		// apply a few dependable raw transactions before actual simulating
+//		for _, rawTx := range simulationConf.ApplyBefore {
+//			msg, err := api.decodeRawTransactionToMessage(rawTx)
+//			if err != nil {
+//				return nil, err
+//			}
+//
+//			vmenv := vm.NewEVM(vmctx, statedb, api.eth.blockchain.Config(), vm.Config{})
+//			if _, err := core.ApplyMessage(vmenv, msg, new(core.GasPool).AddGas(msg.Gas())); err != nil {
+//				dependableFailedTransaction = rawTx
+//				dependableFailedTxError = err
+//				break
+//			}
+//			// Finalize the state so any modifications are written to the trie
+//			// Only delete empty objects if EIP158/161 (a.k.a Spurious Dragon) is in effect
+//			statedb.Finalise(vmenv.ChainConfig().IsEIP158(block.Number()))
+//		}
+//	}
+//
+//	// execution failed in between, abort
+//	if dependableFailedTxError != nil {
+//		log.Info("Serving `debug_simulateRawTransaction`",
+//			"apply before", simulationConf.ApplyBefore,
+//			"dependable failed transaction", dependableFailedTransaction,
+//			"err", dependableFailedTxError,
+//			"elapsed", common.PrettyDuration(time.Since(simulateStart)),
+//		)
+//
+//		return nil, dependableFailedTxError
+//	}
+//
+//	gas, err := core.ApplyMessage(vmenv, message, new(core.GasPool).AddGas(message.Gas()))
+//
+//	log.Info("Serving `debug_simulateRawTransaction`",
+//		"apply before", simulationConf.ApplyBefore,
+//		"raw", simulationConf.RawTransaction,
+//		"err", err,
+//		"elapsed", common.PrettyDuration(time.Since(simulateStart)),
+//	)
+//
+//	if err != nil {
+//		return nil, fmt.Errorf("tracing failed: %v", err)
+//	}
+//	// Depending on the tracer type, format and return the output
+//	switch tracer := tracer.(type) {
+//	case *vm.StructLogger:
+//		return &ethapi.ExecutionResult{
+//			Gas:         gas,
+//			Failed:      failed,
+//			ReturnValue: fmt.Sprintf("%x", ret),
+//			StructLogs:  ethapi.FormatLogs(tracer.StructLogs()),
+//		}, nil
+//
+//	case *tracers.Tracer:
+//		return tracer.GetResult()
+//
+//	default:
+//		panic(fmt.Sprintf("bad tracer type %T", tracer))
+//	}
+//}
+
+//func (api *PrivateDebugAPI) SimulatePendingTransaction(ctx context.Context, simulationConf *SimulatePendingConfig, traceConf *TraceConfig) (interface{}, error) {
+//	simulateStart := time.Now()
+//
+//	if simulationConf == nil {
+//		return nil, errors.New("simulation config should be passed")
+//	}
+//
+//	var (
+//		tracer vm.Tracer
+//		err    error
+//	)
+//
+//	tx := api.eth.txPool.Get(simulationConf.Hash)
+//	if tx == nil {
+//		return nil, errors.New("tx not found")
+//	}
+//
+//	signer := types.MakeSigner(api.eth.blockchain.Config(), api.eth.blockchain.CurrentBlock().Number())
+//	message, err := tx.AsMessage(signer)
+//	if err != nil {
+//		return nil, err
+//	}
+//
+//	block := api.eth.blockchain.CurrentBlock()
+//	statedb, err := api.computeStateDB(block, 128)
+//	if err != nil {
+//		return nil, err
+//	}
+//
+//	vmctx := core.NewEVMContext(message, block.Header(), api.eth.blockchain, nil)
+//
+//	switch {
+//	case traceConf != nil && traceConf.Tracer != nil:
+//		// Define a meaningful timeout of a single transaction trace
+//		timeout := defaultTraceTimeout
+//		if traceConf.Timeout != nil {
+//			if timeout, err = time.ParseDuration(*traceConf.Timeout); err != nil {
+//				return nil, err
+//			}
+//		}
+//		// Constuct the JavaScript tracer to execute with
+//		if tracer, err = tracers.New(*traceConf.Tracer); err != nil {
+//			return nil, err
+//		}
+//		// Handle timeouts and RPC cancellations
+//		deadlineCtx, cancel := context.WithTimeout(ctx, timeout)
+//		go func() {
+//			<-deadlineCtx.Done()
+//			tracer.(*tracers.Tracer).Stop(errors.New("execution timeout"))
+//		}()
+//		defer cancel()
+//
+//	case traceConf == nil:
+//		tracer = vm.NewStructLogger(nil)
+//
+//	default:
+//		tracer = vm.NewStructLogger(traceConf.LogConfig)
+//	}
+//
+//	vmenv := vm.NewEVM(vmctx, statedb, params.MainnetChainConfig, vm.Config{Debug: true, Tracer: tracer})
+//
+//	// apply previous transactions
+//	if simulationConf.ApplyPending {
+//		pending := api.fetchPreviousTxsForAddress(message.From())
+//		var failed error
+//
+//		for _, tx := range pending {
+//			if tx.Nonce() < message.Nonce() {
+//				msg, _ := tx.AsMessage(signer)
+//				vmenv := vm.NewEVM(vmctx, statedb, api.eth.blockchain.Config(), vm.Config{})
+//				if _, err := core.ApplyMessage(vmenv, msg, new(core.GasPool).AddGas(msg.Gas())); err != nil {
+//					failed = err
+//					break
+//				}
+//				// Finalize the state so any modifications are written to the trie
+//				// Only delete empty objects if EIP158/161 (a.k.a Spurious Dragon) is in effect
+//				statedb.Finalise(vmenv.ChainConfig().IsEIP158(block.Number()))
+//			}
+//		}
+//
+//		// execution failed in between, abort
+//		if failed != nil {
+//			log.Info("Serving `debug_simulatePendingTransaction`",
+//				"hash", simulationConf.Hash,
+//				"err", nil,
+//				"failed in between", failed,
+//				"elapsed", common.PrettyDuration(time.Since(simulateStart)),
+//			)
+//
+//			return nil, failed
+//		}
+//	}
+//
+//	gas, err := core.ApplyMessage(vmenv, message, new(core.GasPool).AddGas(message.Gas()))
+//
+//	log.Info("Serving `debug_simulatePendingTransaction`",
+//		"hash", simulationConf.Hash,
+//		"err", err,
+//		"failed", failed,
+//		"elapsed", common.PrettyDuration(time.Since(simulateStart)),
+//	)
+//
+//	if err != nil {
+//		return nil, fmt.Errorf("tracing failed: %v", err)
+//	}
+//	// Depending on the tracer type, format and return the output
+//	switch tracer := tracer.(type) {
+//	case *vm.StructLogger:
+//		return &ethapi.ExecutionResult{
+//			Gas:         gas,
+//			Failed:      failed,
+//			ReturnValue: fmt.Sprintf("%x", ret),
+//			StructLogs:  ethapi.FormatLogs(tracer.StructLogs()),
+//		}, nil
+//
+//	case *tracers.Tracer:
+//		return tracer.GetResult()
+//
+//	default:
+//		panic(fmt.Sprintf("bad tracer type %T", tracer))
+//	}
+//}

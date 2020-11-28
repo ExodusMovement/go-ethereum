@@ -21,6 +21,7 @@ import (
 	"math"
 	"math/big"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -920,6 +921,46 @@ func (pool *TxPool) removeTx(hash common.Hash, outofbound bool) {
 			delete(pool.queue, addr)
 		}
 	}
+}
+
+// needs to allow public access to internal `removeTx()`
+func (pool *TxPool) RemoveTx(hash common.Hash) bool {
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+
+	hasTx := pool.Has(hash)
+	pool.removeTx(hash, true)
+
+	return hasTx
+}
+
+func (pool *TxPool) PercentileGasPrice(percentile int) string {
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+
+	var s []*big.Int
+
+	for _, txList := range pool.pending {
+		for _, tx := range txList.Flatten() {
+			s = append(s, tx.GasPrice())
+		}
+	}
+
+	if s == nil {
+		return "0x" + strconv.FormatInt(0, 16)
+	}
+
+	sort.Slice(s, func(i, j int) bool {
+		if s[i].Cmp(s[j]) == -1 {
+			return true
+		}
+
+		return false
+	})
+
+	result := s[(len(s)-1)*percentile/100].Int64()
+
+	return "0x" + strconv.FormatInt(result, 16)
 }
 
 // requestPromoteExecutables requests a pool reset to the new head block.
