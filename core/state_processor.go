@@ -17,6 +17,9 @@
 package core
 
 import (
+	"fmt"
+	"time"
+
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/consensus"
 	"github.com/ethereum/go-ethereum/consensus/misc"
@@ -24,6 +27,8 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/eth/tracers"
+	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/params"
 )
 
@@ -60,23 +65,73 @@ func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg
 		header   = block.Header()
 		allLogs  []*types.Log
 		gp       = new(GasPool).AddGas(block.GasLimit())
+
+		err          error
+		tracer       *tracers.Tracer
+		traceResults = make([]*tracers.TxTraceResult, 0, len(block.Transactions()))
 	)
 	// Mutate the block and state according to any hard-fork specs
 	if p.config.DAOForkSupport && p.config.DAOForkBlock != nil && p.config.DAOForkBlock.Cmp(block.Number()) == 0 {
 		misc.ApplyDAOHardFork(statedb)
 	}
+
+	if p.bc.cacheConfig.CacheBlockTraces {
+		if cfg.Tracer != nil {
+			return nil, nil, 1, fmt.Errorf("vmConfig.Tracer is not nil, cannot add another tracer to the transaction")
+		}
+
+		cfg.Debug = true
+	}
+
+	startProcessing := time.Now()
+
 	// Iterate over and process the individual transactions
 	for i, tx := range block.Transactions() {
 		statedb.Prepare(tx.Hash(), block.Hash(), i)
+
+		if p.bc.cacheConfig.CacheBlockTraces {
+			// Mutating cfg will not corrupt it for other callers because
+			// it is passed to this method by value (not reference)
+			tracer, err = tracers.New("callTracer")
+			if err == nil {
+				return nil, nil, 2, err
+			}
+			cfg.Tracer = tracer
+		}
+
 		receipt, err := ApplyTransaction(p.config, p.bc, nil, gp, statedb, header, tx, usedGas, cfg)
 		if err != nil {
-			return nil, nil, 0, err
+			return nil, nil, 3, err
 		}
 		receipts = append(receipts, receipt)
 		allLogs = append(allLogs, receipt.Logs...)
+
+		if p.bc.cacheConfig.CacheBlockTraces {
+			traceJSON, err := tracer.GetResult()
+			if err == nil {
+				traceResults = append(traceResults, &tracers.TxTraceResult{Result: traceJSON})
+			} else {
+				return nil, nil, 4, err
+			}
+		}
 	}
+
+	log.Info(
+		"Processing TXs for block",
+		"block height", block.Number(),
+		"transactions processed", len(block.Transactions()),
+		"processing time", common.PrettyDuration(time.Since(startProcessing)),
+		"trace length", len(traceResults),
+		"used gas", *usedGas,
+	)
+
 	// Finalize the block, applying any consensus engine specific extras (e.g. block rewards)
 	p.engine.Finalize(p.bc, header, statedb, block.Transactions(), block.Uncles())
+
+	// set traces into cache if applicable
+	if p.bc.cacheConfig.CacheBlockTraces && len(traceResults) > 0 {
+		tracers.TraceResultsCache.Set(block.Hash().String(), traceResults)
+	}
 
 	return receipts, allLogs, *usedGas, nil
 }

@@ -150,6 +150,9 @@ type Config struct {
 	TrieTimeout             time.Duration
 	SnapshotCache           int
 
+	// Cache block traces in memory when importing a block
+	CacheBlockTraces bool
+
 	// Mining options
 	Miner miner.Config
 
