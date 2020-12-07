@@ -926,6 +926,16 @@ func (pool *TxPool) removeTx(hash common.Hash, outofbound bool) {
 	}
 }
 
+func (pool *TxPool) RemoveTx(hash common.Hash) bool {
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+
+	hasTx := pool.Has(hash)
+	pool.removeTx(hash, true)
+
+	return hasTx
+}
+
 // requestPromoteExecutables requests a pool reset to the new head block.
 // The returned channel is closed when the reset has occurred.
 func (pool *TxPool) requestReset(oldHead *types.Header, newHead *types.Header) chan struct{} {
