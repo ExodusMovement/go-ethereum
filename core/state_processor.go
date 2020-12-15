@@ -76,6 +76,10 @@ func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg
 	}
 
 	if p.bc.cacheConfig.CacheBlockTraces {
+		if cfg.Tracer != nil {
+			return nil, nil, 0, fmt.Errorf("vmConfig.Tracer is not nil, cannot add another tracer to the transaction")
+		}
+
 		cfg.Debug = true
 	}
 
@@ -86,10 +90,6 @@ func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg
 		statedb.Prepare(tx.Hash(), block.Hash(), i)
 
 		if p.bc.cacheConfig.CacheBlockTraces {
-			if cfg.Tracer != nil {
-				return nil, nil, 0, fmt.Errorf("vmConfig.Tracer is not nil, cannot add another tracer to the transaction")
-			}
-
 			// Mutating cfg will not corrupt it for other callers because
 			// it is passed to this method by value (not reference)
 			tracer, err = tracers.New("callTracer")
