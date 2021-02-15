@@ -212,6 +212,10 @@ var (
 		Name:  "whitelist",
 		Usage: "Comma separated block number-to-hash mappings to enforce (<number>=<hash>)",
 	}
+	CacheBlockTracesFlag = cli.BoolFlag{
+		Name:  "trace.cache",
+		Usage: "Enables building block trace cache on chain import",
+	}
 	// Light server and client settings
 	LightServeFlag = cli.IntFlag{
 		Name:  "light.serve",
@@ -1548,6 +1552,9 @@ func SetEthConfig(ctx *cli.Context, stack *node.Node, cfg *eth.Config) {
 		cfg.TrieCleanCache += cfg.SnapshotCache
 		cfg.SnapshotCache = 0 // Disabled
 	}
+	if ctx.GlobalIsSet(CacheBlockTracesFlag.Name) {
+		cfg.CacheBlockTraces = ctx.GlobalBool(CacheBlockTracesFlag.Name)
+	}
 	if ctx.GlobalIsSet(DocRootFlag.Name) {
 		cfg.DocRoot = ctx.GlobalString(DocRootFlag.Name)
 	}
@@ -1835,6 +1842,7 @@ func MakeChain(ctx *cli.Context, stack *node.Node, readOnly bool) (chain *core.B
 		TrieDirtyDisabled:   ctx.GlobalString(GCModeFlag.Name) == "archive",
 		TrieTimeLimit:       eth.DefaultConfig.TrieTimeout,
 		SnapshotLimit:       eth.DefaultConfig.SnapshotCache,
+		CacheBlockTraces:    ctx.GlobalBool(CacheBlockTracesFlag.Name),
 	}
 	if !ctx.GlobalIsSet(SnapshotFlag.Name) {
 		cache.SnapshotLimit = 0 // Disabled

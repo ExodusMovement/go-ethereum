@@ -131,6 +131,8 @@ type CacheConfig struct {
 	SnapshotLimit       int           // Memory allowance (MB) to use for caching snapshot entries in memory
 
 	SnapshotWait bool // Wait for snapshot construction on startup. TODO(karalabe): This is a dirty hack for testing, nuke it
+
+	CacheBlockTraces bool // Cache block traces in memory when processing a block
 }
 
 // defaultCacheConfig are the default caching values if none are specified by the
